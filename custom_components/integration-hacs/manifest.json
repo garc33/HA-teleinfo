@@ -1,9 +1,8 @@
 {
-  "domain": "integration-hacs",
-  "name": "integration-hacs",
-  "documentation": "https://github.com/ludeeus/integration-hacs",
+  "domain": "teleinfo",
+  "name": "HA-teleinfo",
+  "documentation": "https://github.com/garc33/HA-teleinfo",
   "dependencies": [],
-  "codeowners": ["@ludeeus"],
-  "requirements": [],
-  "homeassistant": "0.95.0"
+  "codeowners": ["garc33"],
+  "requirements": ["teleinfo>=1.2.1"]
 }
