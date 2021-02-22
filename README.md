@@ -19,9 +19,3 @@ Add to your configuration.yml
 ```
 
 
-## Thanks
-
-Big thank to following projects:
-https://github.com/demikl/python-teleinfo
-https://github.com/shenxn/ha-dyson
-

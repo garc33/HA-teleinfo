@@ -4,5 +4,5 @@
   "documentation": "https://github.com/garc33/HA-teleinfo",
   "dependencies": [],
   "codeowners": ["garc33"],
-  "requirements": ["teleinfo>=1.2.1"]
+  "requirements": ["pyserial-asyncio==0.5"]
 }

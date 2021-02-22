@@ -1,15 +1,15 @@
 import logging
 import voluptuous as vol
+import serial_asyncio
 from datetime import timedelta
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity import Entity
 from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import (CONF_NAME, CONF_RESOURCES, STATE_UNKNOWN, ATTR_ATTRIBUTION)
+from homeassistant.const import (CONF_NAME, CONF_RESOURCES, STATE_UNKNOWN, ATTR_ATTRIBUTION, EVENT_HOMEASSISTANT_STOP)
 from homeassistant.util import Throttle
-from teleinfo import Parser
-from teleinfo.hw_vendors import UTInfo2
 
-REQUIREMENTS = ['teleinfo>=1.2.1']
+
+REQUIREMENTS = ['pyserial-asyncio==0.5']
 DOMAIN = 'teleinfo'
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=60)
 SENSOR_TYPES = {
@@ -45,11 +45,12 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 
 _LOGGER = logging.getLogger(__name__)
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
 	"""Setup sensors"""
-	DATA = TeleinfoData(Parser(UTInfo2("/dev/ttyUSB0")))
+	DATA = TeleinfoData(hass)
 	entities = []
 
+	hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, DATA.stop_serial_read())
 	for resource in config[CONF_RESOURCES]:
 		sensor_type = resource.lower()
 
@@ -58,7 +59,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
 
 		entities.append(TeleinfoSensor(DATA, sensor_type))
 
-	add_entities(entities, True)
+	async_add_entities(entities)
 
 class TeleinfoSensor(Entity):
 	"""Implementation of the Teleinfo sensor."""
@@ -70,6 +71,11 @@ class TeleinfoSensor(Entity):
 		self._unit = SENSOR_TYPES[sensor_type][1]
 		self._state = STATE_UNKNOWN
 		self.data = data
+
+	async def async_added_to_hass(self):
+		"""Handle when an entity is about to be added to Home Assistant."""
+		_LOGGER.info('Initialize sensor %s', self._type)
+		self.data.initialize_reading()
 
 	@property
 	def name(self):
@@ -93,7 +99,6 @@ class TeleinfoSensor(Entity):
 
 	def update(self):
 		"""Get the latest data from device and updates the state."""
-		self.data.update()
 		if not self.data.frame:
 			_LOGGER.warn("no data from teleinfo!")
 			return
@@ -113,18 +118,57 @@ class TeleinfoData:
 	updates from the server.
 	"""
 
-	def __init__(self, parser):
+	def __init__(self, hass):
 		"""Initialize the data object."""
-		self._frame = None
-		self._parser = parser
+		self._frame = {}
+		self._serial_loop_task = None
+		self._hass = hass
 
 	@property
 	def frame(self):
 		"""Get latest update if throttle allows. Return status."""
 		return self._frame
 
-	@Throttle(MIN_TIME_BETWEEN_UPDATES)
-	def update(self, **kwargs):
-		"""Fetch the latest status."""
-		self._frame = self._parser.get_frame()
+	def initialize_reading(self):
+		"""Register read task to home assistant"""
+		if self._serial_loop_task:
+			_LOGGER.warn('task already initialized')
+			return
+
+		_LOGGER.info('Initialize teleinfo task')
+		self._serial_loop_task = self._hass.loop.create_task(
+			self.serial_read("/dev/ttyUSB0", baudrate=1200, bytesize=7, parity='E', stopbits=1, rtscts=1))
+
+	async def serial_read(self, device, **kwargs):
+		"""Process the serial data."""
+		_LOGGER.debug(u"Initializing Teleinfo")
+		reader, _ = await serial_asyncio.open_serial_connection(url=device, **kwargs)
+		is_over = True
+
+		# First read need to clear the grimlins.
+		line = await reader.readline()
+
+		while True:
+			line = await reader.readline()
+			line = line.decode('ascii').replace('\r', '').replace('\n', '')
+
+			if is_over and ('\x02' in line):
+				is_over = False
+				_LOGGER.debug(" Start Frame")
+				continue
+
+			if (not is_over) and ('\x03' not in line):
+				name, value = line.split()[0:2]
+				_LOGGER.debug(" Got : [%s] =  (%s)", name, value)
+				self._frame[name] = value
+
+			if (not is_over) and ('\x03' in line):
+				is_over = True
+				_LOGGER.debug(" End Frame")
+				continue
+
+	async def stop_serial_read(self):
+		"""Close resources."""
+		if self._serial_loop_task:
+			self._serial_loop_task.cancel()
 
