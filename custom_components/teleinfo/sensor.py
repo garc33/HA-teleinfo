@@ -11,7 +11,6 @@ from homeassistant.util import Throttle
 
 REQUIREMENTS = ['pyserial-asyncio==0.5']
 DOMAIN = 'teleinfo'
-MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=60)
 SENSOR_TYPES = {
 	'adco': ['Contrat', '', 'mdi:numeric'],					# N° d’identification du compteur : ADCO(12 caractères)
 	'optarif': ['Option tarifaire', '', 'mdi:file-document-edit'],		# Option tarifaire(type d’abonnement) : OPTARIF(4 car.)
@@ -47,35 +46,37 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
 	"""Setup sensors"""
-	DATA = TeleinfoData(hass)
-	entities = []
+	entities = {}
 
-	hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, DATA.stop_serial_read())
+	
 	for resource in config[CONF_RESOURCES]:
 		sensor_type = resource.lower()
 
 		if sensor_type not in SENSOR_TYPES:
 			_LOGGER.warning("Sensor type: %s does not appear in teleinfo", sensor_type)
 
-		entities.append(TeleinfoSensor(DATA, sensor_type))
+		entities[sensor_type.upper()] = TeleinfoSensor(sensor_type)
+	
+	DATA = TeleinfoData(hass, entities)
+	DATA.initialize_reading()
+	async_add_entities(entities.values())
 
-	async_add_entities(entities)
 
 class TeleinfoSensor(Entity):
 	"""Implementation of the Teleinfo sensor."""
 
-	def __init__(self, data, sensor_type):
+	def __init__(self, sensor_type):
 		"""Initialize the sensor."""
 		self._type = sensor_type
 		self._name = SENSOR_TYPES[sensor_type][0]
 		self._unit = SENSOR_TYPES[sensor_type][1]
 		self._state = STATE_UNKNOWN
-		self.data = data
+		self.ready = False
 
 	async def async_added_to_hass(self):
 		"""Handle when an entity is about to be added to Home Assistant."""
 		_LOGGER.info('Initialize sensor %s', self._type)
-		self.data.initialize_reading()
+		self.ready = True
 
 	@property
 	def name(self):
@@ -97,20 +98,23 @@ class TeleinfoSensor(Entity):
 		"""Return the unit of measurement of this entity, if any."""
 		return self._unit
 
-	def update(self):
-		"""Get the latest data from device and updates the state."""
-		if not self.data.frame:
-			_LOGGER.warn("no data from teleinfo!")
-			return
-		val = self.data.frame[self._type.upper()]
-		if not val:
-			_LOGGER.warn("no data for %s", self._type.upper())
+	@property
+	def should_poll(self):
+		"""No polling needed."""
+		return False
+
+	def update_state(self, value):
+		"""updates the state with value"""
+		_LOGGER.debug("update sensor %s with value %s", self._type, value)
+		if not self.ready:
 			return
 
-		if val.isdigit():
-			self._state = int(val)
+		if value.isdigit():
+			self._state = int(value)
 		else:
-			self._state = val
+			self._state = value
+
+		self.async_schedule_update_ha_state()
 
 class TeleinfoData:
 	"""Stores the data retrieved from Teleinfo.
@@ -118,16 +122,11 @@ class TeleinfoData:
 	updates from the server.
 	"""
 
-	def __init__(self, hass):
+	def __init__(self, hass, sensors):
 		"""Initialize the data object."""
-		self._frame = {}
 		self._serial_loop_task = None
 		self._hass = hass
-
-	@property
-	def frame(self):
-		"""Get latest update if throttle allows. Return status."""
-		return self._frame
+		self._sensors = sensors
 
 	def initialize_reading(self):
 		"""Register read task to home assistant"""
@@ -136,6 +135,7 @@ class TeleinfoData:
 			return
 
 		_LOGGER.info('Initialize teleinfo task')
+		self._hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self.stop_serial_read())
 		self._serial_loop_task = self._hass.loop.create_task(
 			self.serial_read("/dev/ttyUSB0", baudrate=1200, bytesize=7, parity='E', stopbits=1, rtscts=1))
 
@@ -154,13 +154,14 @@ class TeleinfoData:
 
 			if is_over and ('\x02' in line):
 				is_over = False
-				_LOGGER.debug(" Start Frame")
+				_LOGGER.debug("Start Frame")
 				continue
 
 			if (not is_over) and ('\x03' not in line):
 				name, value = line.split()[0:2]
-				_LOGGER.debug(" Got : [%s] =  (%s)", name, value)
-				self._frame[name] = value
+				_LOGGER.debug("Got : [%s] =  (%s)", name, value)
+				if name in self._sensors:
+					self._sensors[name].update_state(value)
 
 			if (not is_over) and ('\x03' in line):
 				is_over = True
